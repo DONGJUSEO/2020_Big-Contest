@@ -1,0 +1,254 @@
+##### 공모전 모델링 : XGBoost(gbtree)
+
+### 데이터 불러오기
+
+# 라이브러리
+
+library(readxl)
+library(dplyr)
+library(data.table)
+library(Metrics)
+library(mlr)
+library(xgboost)
+library(randomForest)
+library(caret)
+library(knitr)
+library(NbClust)
+library(tidyverse)
+library(reshape2)
+library(ggplot2)
+library(mlrMBO)
+library(devtools)
+library(autoxgboost)
+library(rBayesianOptimization)
+library(writexl)
+library(factoextra)
+library(splitstackshape)
+
+data1 <- read_excel("C:/Users/cgpark/Desktop/df_variable_update.xlsx")
+data2 <- read_excel("C:/Users/cgpark/Desktop/외부데이터.xlsx")
+data2 <- data2[,-1] # date 제외
+data3 <- cbind(data1, data2)
+colnames(data3)[28] <- c("exchange_rate_us")
+colnames(data3)[67] <- c("exchange_rate_china")
+colnames(data3)[68] <- c("exchange_rate_japan")
+colnames(data3)[69] <- c("exchange_rate_euro")
+
+colnames(data3)
+data3 <- data3[,c(6,7,9,11,12,13,16,17,18,22,23,24,25,26,27,28,29,30,67,68,69)]
+
+data <- data.frame(group=as.factor(data3$group), product_detail=as.factor(data3$product_detail), hour=as.factor(data3$hour), dow=as.factor(data3$dow), 
+                   early=as.factor(data3$early), month=as.factor(data3$month), season=as.factor(data3$season), group_exposure=as.factor(data3$group_exposure), 
+                   detail=as.factor(data3$detail), data3[,c(3,4,12,14:21)])
+
+
+
+
+
+### 재범주화
+
+# dow (수/금, 월/화/목, 토/일), month (2/3/4/5, 1/6/7/9/10, 8/11/12), season (봄, 여름/가을/겨울), hour (0/1/2/6/20, 7/8/9/10/11/12/13/14/15/19, 16/17/18, 21/22/23)
+
+d <- tapply(data$sales, data$test, mean)
+v <- melt(d)
+ggplot(v, aes(x=Var1, y=value, fill=Var1))+geom_bar(stat="identity")
+
+levels(data$hour) <- c("0", "0", "0", "0", "1", "1", "1", "1", "1", "1", "1", "1", "1", "2", "2", "2", "1", "0", "3", "3", "3")
+levels(data$dow) <- c("0", "1", "0", "1", "2", "2", "1")
+levels(data$month) <- c("1", "0", "0", "0", "0", "1", "1", "2", "1", "1", "2", "2")
+levels(data$season) <- c("1", "1", "0", "1")
+
+
+
+
+
+### 파생변수 생성
+
+# sales_count
+
+df1 <- data[,c(1,2,3,4,6,7,11)]
+
+sales_group_count <- df1[,c(1,7)] %>% group_by(group) %>% mutate(빈도수=n())
+sales_group_count <- data.frame(sales_group_count=sales_group_count[,2]/sales_group_count[,3])
+
+sales_productdetail_count <- df1[,c(2,7)] %>% group_by(product_detail) %>% mutate(빈도수=n())
+sales_productdetail_count <- data.frame(sales_productdetail_count=sales_productdetail_count[,2]/sales_productdetail_count[,3])
+
+sales_hour_count <- df1[,c(3,7)] %>% group_by(hour) %>% mutate(빈도수=n())
+sales_hour_count <- data.frame(sales_hour_count=sales_hour_count[,2]/sales_hour_count[,3])
+
+sales_dow_count <- df1[,c(4,7)] %>% group_by(dow) %>% mutate(빈도수=n()) 
+sales_dow_count <- data.frame(sales_dow_count=sales_dow_count[,2]/sales_dow_count[,3])
+
+sales_month_count <- df1[,c(5,7)] %>% group_by(month) %>% mutate(빈도수=n())
+sales_month_count <- data.frame(sales_month_count=sales_month_count[,2]/sales_month_count[,3])
+
+sales_season_count <- df1[,c(6,7)] %>% group_by(season) %>% mutate(빈도수=n())
+sales_season_count <- data.frame(sales_season_count=sales_season_count[,2]/sales_season_count[,3])
+
+
+data <- cbind(data, sales_group_count=sales_group_count, sales_productdetail_count=sales_productdetail_count, sales_hour_count=sales_hour_count,
+              sales_dow_count=sales_dow_count, sales_month_count=sales_month_count, sales_season_count=sales_season_count)
+
+names(data)[21:26] <- c("sales_group_count", "sales_productdetail_count", "sales_hour_count", 
+                        "sales_dow_count", "sales_month_count", "sales_season_count")
+
+
+
+
+
+### k-means 클러스터링
+
+# salescount
+
+data_kmeans_salescount <- scale(data[,c(21:26)]) # 표준화 선 진행
+
+set.seed(2018220085)
+
+wss_salescount <- (nrow(data_kmeans_salescount[,c(1:6)])-1)*sum(apply(data_kmeans_salescount[,c(1:6)],2,var)) 
+for (i in 2:dim(data_kmeans_salescount[,c(1:6)])[2]) { 
+  wss_salescount[i] <- sum(kmeans(data_kmeans_salescount[,c(1:6)], centers = i)$withinss) 
+}  
+
+plot(1:dim(data_kmeans_salescount[,c(1:6)])[2], wss_salescount, type = "b", xlab = "Number of Clusters", 
+     ylab = "Within groups sum of squares") # 4
+
+kmeans_salescount <- kmeans(data_kmeans_salescount, center=4)
+cluster_salescount <- as.factor(kmeans_salescount$cluster)
+
+data <- cbind(data, cluster_salescount)
+
+# economy
+
+data_kmeans_economy <- scale(data[,c(15,16,18:20)])
+
+set.seed(2018220085)
+
+wss_economy <- (nrow(data_kmeans_economy[,c(1:5)])-1)*sum(apply(data_kmeans_economy[,c(1:5)],2,var)) 
+for (i in 2:dim(data_kmeans_economy[,c(1:5)])[2]) { 
+  wss_economy[i] <- sum(kmeans(data_kmeans_economy[,c(1:5)], centers = i)$withinss) 
+}  
+
+plot(1:dim(data_kmeans_economy[,c(1:5)])[2], wss_economy, type = "b", xlab = "Number of Clusters", 
+     ylab = "Within groups sum of squares") # 4
+
+kmeans_economy <- kmeans(data_kmeans_economy, center=4)
+cluster_economy <- as.factor(kmeans_economy$cluster)
+
+data <- cbind(data, cluster_economy)
+
+# 시각화
+
+fviz_cluster(kmeans_salescount, data=data_kmeans_salescount, geom="point")
+fviz_cluster(kmeans_economy, data=data_kmeans_economy, geom="point")
+
+
+
+
+
+### min-max scaling (only numeric variable) : 종속변수는 제외
+
+f2 <- function(x){
+  data.frame((x-min(x))/(max(x)-min(x)))
+}
+
+sales_price <- f2(data$price)
+sales_temperature <- f2(data$temperature)
+sales_ratingmean <- f2(data$rating_mean)
+sales_searchforcoronavirus <- f2(data$search.for.coronavirus)
+sales_exchangerate_us <- f2(data$exchange_rate_us)
+sales_interestrate <- f2(data$interest.rate)
+sales_averageprecipitation <- f2(data$average.precipitation)
+sales_exchangerate_china <- f2(data$exchange_rate_china)
+sales_exchangerate_japan <- f2(data$exchange_rate_japan)
+sales_exchangerate_euro <- f2(data$exchange_rate_euro)
+sales_group_count <- f2(data$sales_group_count)
+sales_productdetail_count <- f2(data$sales_productdetail_count)
+sales_dow_count <- f2(data$sales_dow_count)
+sales_month_count <- f2(data$sales_month_count)
+sales_season_count <- f2(data$sales_season_count)
+sales_hour_count <- f2(data$sales_hour_count)
+
+data <- data[,-c(10,12:26)]
+data <- cbind(data, sales_price, sales_temperature, sales_ratingmean, sales_searchforcoronavirus, sales_exchangerate_us, sales_interestrate, sales_averageprecipitation,
+              sales_exchangerate_china = sales_exchangerate_china, sales_exchangerate_japan = sales_exchangerate_japan, sales_exchangerate_euro = sales_exchangerate_euro,
+              sales_group_count, sales_productdetail_count, sales_dow_count, sales_month_count, sales_season_count, sales_hour_count)
+names(data)[13:28] <- c("sales_price", "sales_temperature", "sales_ratingmean", "sales_searchforcoronavirus", "sales_exchangerate_us", "sales_interestrate", 
+                        "sales_averageprecipitation", "sales_exchangerate_china", "sales_exchange_japan", "sales_exchange_euro", "sales_group_count", 
+                        "sales_productdetail_count", "sales_dow_count", "sales_month_count", "sales_season_count", "sales_hour_count")
+
+
+
+
+
+### XGBoost
+
+# training, test set
+
+set.seed(2018220085)
+
+indexTrain = sample(1:nrow(data), size = round(0.8 * nrow(data)))
+
+train_set <- data[indexTrain, ]
+test_set <- data[-indexTrain, ]
+
+# using one hot encoding
+
+train_dummy <- dummyVars("~.", data=train_set)
+train_newdata <- data.frame(predict(train_dummy, newdata=train_set))
+
+test_dummy <- dummyVars("~.", data=test_set)
+test_newdata <- data.frame(predict(test_dummy, newdata=test_set))
+
+# preparing matrix
+
+colnames(train_newdata)
+dtrain <- xgb.DMatrix(data=as.matrix(train_newdata[,-114]), label=train_newdata[,114])
+dtest <- xgb.DMatrix(data=as.matrix(test_newdata[,-114]), label=test_newdata[,114])
+
+# using bayesian optimization
+
+cv_folds <- KFold(train_newdata[,114], nfolds = 5, seed = 12345)
+
+xgb_cv_bayes <- function(booster, gamma, max.depth, min_child_weight, subsample, colsample_bytree){
+  cv <- xgb.cv(params = list(booster = "gbtree", eta = 0.001, gamma = gamma,
+                             max_depth = 10, min_child_weight = min_child_weight,
+                             subsample = subsample, colsample_bytree = colsample_bytree,
+                             objective = "reg:linear", eval_metric = "mae"),
+               
+               data = dtrain, nround = 25000, folds = cv_folds, 
+               prediction = TRUE, showsd = TRUE, early.stop.round = 100, 
+               maximize = TRUE, verbose = 0)
+  list(Score = -cv$evaluation_log[,min(test_mae_mean)]
+       , Pred = cv$pred
+       , cb.print.evaluation(period = 1))
+}
+
+OPT_Res <- BayesianOptimization(xgb_cv_bayes,
+                                bounds = list(
+                                  gamma = c(9L, 10L, 11L),
+                                  min_child_weight = c(0.25, 0.5, 0.75),
+                                  subsample = c(0.85, 0.9, 0.95),
+                                  colsample_bytree = c(0.85, 0.9, 0.95)),
+                                init_grid_dt = NULL, init_points = 10, n_iter = 25,
+                                acq = "ucb", kappa = 2.576, eps = 0.0, verbose = TRUE)
+
+# model training
+
+OPT_Res$Best_Par
+params <- list(booster="gbtree", eta=0.001, max_depth=10, min_child_weight=0.3110, subsample=0.8958, colsample_bytree=0.8704, gamma=9, objective="reg:linear", eval_metric="mae")
+xgb <- xgb.train(params=params, data=dtrain, nrounds=25000, early.stop.round=100, nfold=5, seed=2018220085, watchlist=list(train=dtrain, test=dtest))
+
+# prediction
+
+xgbpred <- predict(xgb,dtest)
+
+# MAPE
+
+options("scipen" = 100)
+mean(abs((test_set$sales-xgbpred)/test_set$sales))*100
+
+# 시각화
+
+importance_matrix <- xgb.importance(xgb$finalModel$feauture_names, model=xgb)
+xgb.plot.importance(importance_matrix)
